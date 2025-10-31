@@ -1,0 +1,114 @@
+library(mclust) # Library for estimating parameters of Gaussian mixtures
+
+#' @cluster_obj: Data frame with the columns color index, red magnitude and redshift for
+#  the galaxies in the sample (The data frame should be pre-filtered with color index between 0 and 4
+#  and red magnitude between 12 and 30)
+#' @max_cluster: Maximum number of allowed clusters to classify
+#' @min_objects: Minimum number of elements in each cluster
+#' @alpha: Confidence level for the Mahalanobis distance to accept a galaxy in a cluster
+#' @return: List with two or three data frames (one for each detected cluster) with the columns color index, red magnitude and redshift # for the galaxies in the defined clusters
+
+
+GlxyCluster <- function(cluster_obj, max_clusters = 2, min_objects = 1, alpha = 0.05) {
+  k <- max_clusters
+  clust_model <- Mclust(cluster_obj$cluster_data, G = 1:k, modelName = "VVV", verbose = FALSE)
+  
+  # Ensure clusters meet minimum object requirement
+  while (k > 1 & min(clust_model$parameters$pro) * nrow(cluster_obj$cluster_data) < min_objects) {
+    k <- k - 1
+    clust_model <- Mclust(cluster_obj$cluster_data, G = 1:k, modelName = "VVV", verbose = FALSE)
+  }
+  
+  results <- list()
+  for (i in 1:k) {
+    cov_matrix <- clust_model$parameters$variance$sigma[, , i]
+    mean_values <- clust_model$parameters$mean[, i]
+    
+    # Calculate Mahalanobis distance threshold
+    chi_crit <- qchisq(1 - alpha, dim(cov_matrix)[1])
+    cluster_subset <- subset(cluster_obj$cluster_data, clust_model$classification == i)
+    distances <- mahalanobis(cluster_subset, mean_values, cov_matrix)
+    filtered_subset <- subset(cluster_subset, distances < chi_crit)
+    
+    mean_values <- colMeans(filtered_subset)[1:2]
+    cov_matrix <- cov(filtered_subset)
+    
+    # Eigen decomposition for principal components
+    eig <- eigen(cov_matrix)
+    eigenvalues <- eig$values
+    eigenvectors <- eig$vectors
+    slope <- eigenvectors[2, 1] / eigenvectors[1, 1]  # Slope of principal axis
+    
+    if (slope < 0) {
+      intercept <- mean_values[2] - slope * mean_values[1]
+      lower_bound <- intercept - sqrt(eigenvalues[2])
+      upper_bound <- intercept + sqrt(eigenvalues[2])
+      final_subset <- subset(filtered_subset, 
+                            colind >= magr * slope + lower_bound & 
+                            colind <= magr * slope + upper_bound)
+    } else {
+      final_subset <- filtered_subset
+    }
+    
+    is_cluster <- (slope < 0)
+    cluster_obj <- list(
+      is_cluster = is_cluster,
+      cluster_data = final_subset,
+      slope = slope,
+      mean = mean_values
+    )
+    class(cluster_obj) <- "cluster"
+    results[[i]] <- cluster_obj
+  }
+  
+  # Order clusters by magnitude
+  if (results[[2]]$mean[1] < results[[1]]$mean[1]) {
+    temp <- results[[2]]
+    results[[2]] <- results[[1]]
+    results[[1]] <- temp
+  }
+  
+  # Re-estimate if primary cluster is invalid
+  if (!results[[1]]$is_cluster) {
+    data_subset <- results[[1]]$cluster_data
+    temp <- results[[2]]
+    clust_model <- Mclust(data_subset, G = 1:k, modelName = "VVV", verbose = FALSE)
+    k <- clust_model$G
+    
+    for (i in 1:k) {
+      cov_matrix <- clust_model$parameters$variance$sigma[, , i]
+      mean_values <- clust_model$parameters$mean[, i]
+      chi_crit <- qchisq(1 - alpha, dim(cov_matrix)[1])
+      cluster_subset <- subset(data_subset, clust_model$classification == i)
+      distances <- mahalanobis(cluster_subset, mean_values, cov_matrix)
+      filtered_subset <- subset(cluster_subset, distances < chi_crit)
+      
+      mean_values <- colMeans(filtered_subset)[1:2]
+      cov_matrix <- cov(filtered_subset)
+      eig <- eigen(cov_matrix)
+      eigenvalues <- eig$values
+      eigenvectors <- eig$vectors
+      slope <- eigenvectors[2, 1] / eigenvectors[1, 1]
+      
+      if (slope < 0) {
+        intercept <- mean_values[2] - slope * mean_values[1]
+        lower_bound <- intercept - sqrt(eigenvalues[2])
+        upper_bound <- intercept + sqrt(eigenvalues[2])
+        final_subset <- subset(filtered_subset, 
+                              colind >= magr * slope + lower_bound & 
+                              colind <= magr * slope + upper_bound)
+        is_cluster <- (slope < 0)
+      } else {
+        is_cluster <- (slope < 0)
+        final_subset <- filtered_subset
+      }
+      results[[i]] <- list(
+        is_cluster = is_cluster,
+        cluster_data = final_subset,
+        slope = slope
+      )
+    }
+    if (k == 2) results[[3]] <- temp
+  }
+  return(results)
+}
